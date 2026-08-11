@@ -370,15 +370,25 @@ This matters more than the count, so it is stated plainly rather than implied:
 | Missing key / project / credentials fail before any request goes out | ✅ |
 | Bedrock event framing, CRC rejection of a corrupted frame | ✅ against frames built to the documented layout |
 | SigV4 signature: scope, signed-header set, body sensitivity, determinism | ✅ structurally |
+| SigV4 signing key and final signature | ✅ against AWS's own `get-vanilla` test vector |
 | **Any request accepted by any live vendor API** | ❌ **never attempted — no keys** |
-| **SigV4 validated against AWS's own test vectors or a real endpoint** | ❌ |
 | **Vertex token minting** | ❌ out of scope by design, see above |
+
+The SigV4 vector is the `get-vanilla` case of AWS's signing test suite, copied
+verbatim from `awslabs/aws-c-auth`. Its canonical request is deliberately *not*
+replayed: that case signs `host;x-amz-date`, while this signer always signs
+`x-amz-content-sha256` too, and widening the signer to fit a fixture would be
+the fixture writing the code. What the vector pins instead is the half that no
+caller's header choice can change — the signing-key ladder and the final HMAC —
+by running AWS's own string-to-sign through them and comparing with AWS's own
+signature. Change the secret, the date, the region or the service by one
+character and the test fails.
 
 So the honest claim is *adapters for twelve APIs, verified at the wire level
 against a fake server* — not "integrated with twelve providers". `tests/test_providers.py`
-is 31 tests and is where the wire-level claim comes from. If a key ever gets
+is 33 tests and is where the wire-level claim comes from. If a key ever gets
 added, the thing to do is run one real call per vendor and replace this table's
-last three rows with results.
+last two rows with results.
 
 ## Resolving templates once instead of every attempt
 
@@ -822,7 +832,7 @@ Postgres is deliberately absent: nothing in the engine talks to it.
 
 ## Testing against the real services
 
-**435 Python tests, plus 9 in Java.** The suite needs no daemon: the Redis store runs against an
+**437 Python tests, plus 9 in Java.** The suite needs no daemon: the Redis store runs against an
 in-process RESP server, the SQL store against sqlite, object storage against a
 fake bucket, the MCP gateway against a real server subprocess over real pipes,
 the model adapters against an in-process server speaking each vendor's wire
@@ -862,12 +872,27 @@ FLOWFORGE_TEST_REDIS=127.0.0.1:6399 FLOWFORGE_TEST_MYSQL=127.0.0.1:3399 \
   python3 -m unittest discover -s tests -t .
 ```
 
-With none of them set, 36 tests skip and 399 run. With all four, **all 435 pass**
+With none of them set, 36 tests skip and 401 run. With all four, **all 437 pass**
 against Redis 7.4.10, MySQL 8.4.11, MinIO and Kafka 3.9.0 — including a
 pause/save/load/resume cycle through each store, a signature MinIO itself
 verifies, and a record batch a real broker accepts. The ports are deliberately
 not the defaults, so a suite run cannot reach a Redis, MinIO or broker you
 already had running.
+
+## Open items
+
+One thing is knowingly unfinished, and it is the row the verification table
+above marks ❌:
+
+- [ ] **A real call to a live vendor API.** Twelve adapters are asserted at the
+  wire level against an in-process server that records what it receives; not one
+  of them has ever been accepted by the vendor it targets. What blocks this is a
+  key, not code — a single free-tier OpenAI-shaped key exercises most of the
+  table in one call, while Bedrock and Vertex each need their own. It stays a
+  manual step rather than a CI job: a public repository's Actions should not
+  hold vendor credentials, and a test that spends money on every push is a bad
+  test. Done means replacing the table's last rows with what actually came
+  back — including anywhere the adapter turns out to be wrong.
 
 ## License
 

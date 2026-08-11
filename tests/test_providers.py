@@ -11,6 +11,8 @@ adapter here has ever been pointed at a live API — see the README's status tab
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import unittest
 from datetime import datetime, timezone
@@ -21,6 +23,7 @@ from flowforge.providers import (
     BedrockProvider,
     OpenAICompatibleProvider,
     VertexProvider,
+    _signing_key,
     canonical_request_for,
     close_shared_pool,
     encode_event_frame,
@@ -466,6 +469,63 @@ class SigV4Tests(unittest.TestCase):
         self.assertEqual(lines[2], "")  # no query on this endpoint
         self.assertEqual(lines[-1], self.sign()["X-Amz-Content-Sha256"])
         self.assertEqual(lines[-2], "host;x-amz-content-sha256;x-amz-date")
+
+
+class SigV4OfficialVectorTests(unittest.TestCase):
+    """The signing chain against AWS's own published answer.
+
+    Everything in :class:`SigV4Tests` asserts *structure* — that the scope reads
+    the way it should, that the signature moves when the body does. None of it
+    proves the number is the one AWS would compute. These constants are the
+    ``get-vanilla`` case of AWS's signing test suite, copied verbatim from
+    ``awslabs/aws-c-auth`` (``tests/aws-signing-test-suite/v4/get-vanilla``).
+
+    The suite's canonical request cannot be replayed through
+    :func:`canonical_request_for`: ``get-vanilla`` signs ``host;x-amz-date``,
+    while this signer always signs ``x-amz-content-sha256`` too. So what is
+    pinned here is the half that does not depend on which headers a caller
+    signs — the signing-key ladder and the final HMAC — by feeding AWS's own
+    string-to-sign through them and comparing with AWS's own signature.
+    """
+
+    SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+    DATESTAMP = "20150830"
+    REGION = "us-east-1"
+    SERVICE = "service"
+
+    CANONICAL_REQUEST = (
+        "GET\n"
+        "/\n"
+        "\n"
+        "host:example.amazonaws.com\n"
+        "x-amz-date:20150830T123600Z\n"
+        "\n"
+        "host;x-amz-date\n"
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
+    STRING_TO_SIGN = (
+        "AWS4-HMAC-SHA256\n"
+        "20150830T123600Z\n"
+        "20150830/us-east-1/service/aws4_request\n"
+        "bb579772317eb040ac9ed261061d46c1f17a8133879d6129b6e1c25292927e63"
+    )
+    SIGNATURE = "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+
+    def test_signature_matches_the_aws_test_suite_vector(self):
+        key = _signing_key(self.SECRET, self.DATESTAMP, self.REGION, self.SERVICE)
+        signature = hmac.new(
+            key, self.STRING_TO_SIGN.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        self.assertEqual(signature, self.SIGNATURE)
+
+    def test_the_embedded_vector_is_internally_consistent(self):
+        # Guards the constants above against a bad edit: the last line of the
+        # string-to-sign is the hash of the canonical request, so a typo in
+        # either shows up here rather than as a confusing failure above.
+        self.assertEqual(
+            self.STRING_TO_SIGN.split("\n")[-1],
+            hashlib.sha256(self.CANONICAL_REQUEST.encode("utf-8")).hexdigest(),
+        )
 
 
 class NodeIntegrationTests(unittest.IsolatedAsyncioTestCase):

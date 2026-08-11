@@ -1,0 +1,91 @@
+{
+  "id": "batch_review",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "fetch",
+      "type": "stub",
+      "timeout": 5,
+      "retries": 2,
+      "config": {
+        "delay": 0.02,
+        "output": { "files": ["engine.py", "graph.py", "variables.py"] }
+      }
+    },
+    {
+      "id": "enrich",
+      "type": "stub",
+      "on_error": "default",
+      "error_output": { "owner": "unassigned" },
+      "config": { "fail": "owner service unavailable" }
+    },
+    {
+      "id": "review_each",
+      "type": "iterate",
+      "on_error": "branch",
+      "error_branch": "error",
+      "config": {
+        "items": "{{ fetch.files }}",
+        "item_as": "file",
+        "max_concurrency": 4,
+        "on_item_error": "skip",
+        "collect": "verdict",
+        "workflow": {
+          "id": "review_one",
+          "nodes": [
+            {
+              "id": "read",
+              "type": "stub",
+              "config": { "delay": 0.01, "output": { "path": "{{ inputs.file }}" } }
+            },
+            {
+              "id": "judge",
+              "type": "llm",
+              "timeout": 30,
+              "retries": 1,
+              "config": {
+                "provider": "echo",
+                "model": "claude-opus-5",
+                "prompt": "review {{ read.path }}"
+              }
+            },
+            {
+              "id": "verdict",
+              "type": "stub",
+              "config": { "output": { "verdict": "{{ judge.text }}" } }
+            }
+          ],
+          "edges": [
+            { "source": "read", "target": "judge" },
+            { "source": "judge", "target": "verdict" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "summarize",
+      "type": "stub",
+      "config": {
+        "output": {
+          "message": "reviewed {{ review_each.count }} file(s), owner {{ enrich.owner }}"
+        }
+      }
+    },
+    {
+      "id": "alert",
+      "type": "stub",
+      "config": { "output": { "paged": "{{ review_each.error }}" } }
+    },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "fetch" },
+    { "source": "start", "target": "enrich" },
+    { "source": "fetch", "target": "review_each" },
+    { "source": "enrich", "target": "summarize" },
+    { "source": "review_each", "target": "summarize", "branch": "ok" },
+    { "source": "review_each", "target": "alert", "branch": "error" },
+    { "source": "summarize", "target": "end" },
+    { "source": "alert", "target": "end" }
+  ]
+}

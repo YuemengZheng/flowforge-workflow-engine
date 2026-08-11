@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: flowforge-history
+  datasource:
+    url: ${FLOWFORGE_JDBC_URL:jdbc:mysql://127.0.0.1:3306/flowforge}
+    username: ${FLOWFORGE_DB_USER:root}
+    password: ${FLOWFORGE_DB_PASSWORD:flowforge}
+  sql:
+    init:
+      mode: always
+  kafka:
+    bootstrap-servers: ${FLOWFORGE_KAFKA:127.0.0.1:9092}
+    consumer:
+      group-id: ${FLOWFORGE_GROUP:flowforge-history}
+      # This service is a projection: on a fresh group it should fold the whole
+      # topic, not just what arrives after it starts.
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+server:
+  port: ${PORT:8090}
+
+flowforge:
+  topic: ${FLOWFORGE_KAFKA_TOPIC:flowforge.events}
+  group: ${FLOWFORGE_GROUP:flowforge-history}
+
+logging:
+  level:
+    org.apache.kafka: WARN

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowforge"
+version = "0.5.0"
+description = "A DAG workflow engine with a Kahn-driven concurrent scheduler"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = []
+
+# The engine, both HTTP surfaces and the sqlite store need nothing installed.
+# These are per-feature: `anthropic` for the LLM node's Anthropic provider,
+# `pymysql` for the MySQL checkpoint store.
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+mysql = ["pymysql>=1.1"]
+dev = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "pymysql>=1.1"]
+
+[project.scripts]
+flowforge = "flowforge.__main__:main"
+
+[tool.setuptools]
+packages = ["flowforge"]

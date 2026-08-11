@@ -1,0 +1,53 @@
+{
+  "id": "triage",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "classify",
+      "type": "stub",
+      "config": { "delay": 0.02, "output": { "severity": "{{ inputs.severity ?? 3 }}" } }
+    },
+    {
+      "id": "route",
+      "type": "decision",
+      "config": {
+        "cases": [
+          {
+            "branch": "urgent",
+            "when": { "left": "{{ classify.severity }}", "op": "gte", "right": 8 }
+          }
+        ],
+        "default": "normal"
+      }
+    },
+    {
+      "id": "page_oncall",
+      "type": "stub",
+      "config": { "delay": 0.02, "output": { "engineer": "on-call-1" } }
+    },
+    {
+      "id": "queue_ticket",
+      "type": "stub",
+      "config": { "delay": 0.02, "output": { "queue": "standard" } }
+    },
+    {
+      "id": "notify",
+      "type": "stub",
+      "config": {
+        "output": {
+          "message": "severity {{ classify.severity }} routed to {{ route.branch }}, owner {{ page_oncall.engineer ?? \"unassigned\" }}"
+        }
+      }
+    },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "classify" },
+    { "source": "classify", "target": "route" },
+    { "source": "route", "target": "page_oncall", "branch": "urgent" },
+    { "source": "route", "target": "queue_ticket", "branch": "normal" },
+    { "source": "page_oncall", "target": "notify" },
+    { "source": "queue_ticket", "target": "notify" },
+    { "source": "notify", "target": "end" }
+  ]
+}

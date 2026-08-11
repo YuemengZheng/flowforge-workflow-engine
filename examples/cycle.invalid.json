@@ -1,0 +1,15 @@
+{
+  "id": "cycle",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    { "id": "a", "type": "stub" },
+    { "id": "b", "type": "stub" },
+    { "id": "c", "type": "stub" }
+  ],
+  "edges": [
+    { "source": "start", "target": "a" },
+    { "source": "a", "target": "b" },
+    { "source": "b", "target": "c" },
+    { "source": "c", "target": "a" }
+  ]
+}

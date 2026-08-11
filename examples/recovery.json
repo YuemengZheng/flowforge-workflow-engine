@@ -1,0 +1,26 @@
+{
+  "id": "recovery",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    { "id": "fetch", "type": "stub", "config": { "delay": 0.02, "output": { "rows": 3 } } },
+    {
+      "id": "enrich",
+      "type": "stub",
+      "timeout": 1,
+      "retries": 2,
+      "on_error": "branch",
+      "config": { "fail": "upstream enrichment service is down" }
+    },
+    { "id": "fallback", "type": "stub", "config": { "output": { "owner": "unassigned" } } },
+    { "id": "summarize", "type": "stub", "config": { "delay": 0.01 } },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "fetch" },
+    { "source": "fetch", "target": "enrich" },
+    { "source": "enrich", "target": "summarize" },
+    { "source": "enrich", "target": "fallback", "branch": "error" },
+    { "source": "fallback", "target": "summarize" },
+    { "source": "summarize", "target": "end" }
+  ]
+}

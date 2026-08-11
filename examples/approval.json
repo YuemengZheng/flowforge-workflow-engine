@@ -1,0 +1,55 @@
+{
+  "id": "approval",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "build",
+      "type": "stub",
+      "config": { "delay": 0.02, "output": { "sha": "a1b2c3d", "tests": "passing" } }
+    },
+    {
+      "id": "ask",
+      "type": "await_input",
+      "config": {
+        "prompt": "Deploy {{ build.sha }} to production? Tests are {{ build.tests }}.",
+        "fields": ["approved"]
+      }
+    },
+    {
+      "id": "gate",
+      "type": "decision",
+      "config": {
+        "cases": [
+          { "branch": "go", "when": { "left": "{{ ask.approved }}", "op": "eq", "right": true } }
+        ],
+        "default": "halt"
+      }
+    },
+    {
+      "id": "deploy",
+      "type": "stub",
+      "config": { "delay": 0.02, "output": { "deployed": "{{ build.sha }}" } }
+    },
+    { "id": "notify_hold", "type": "stub", "config": { "output": { "held": true } } },
+    {
+      "id": "report",
+      "type": "stub",
+      "config": {
+        "output": {
+          "message": "sha {{ build.sha }} -> {{ gate.branch }} (deployed: {{ deploy.deployed ?? \"none\" }})"
+        }
+      }
+    },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "build" },
+    { "source": "build", "target": "ask" },
+    { "source": "ask", "target": "gate" },
+    { "source": "gate", "target": "deploy", "branch": "go" },
+    { "source": "gate", "target": "notify_hold", "branch": "halt" },
+    { "source": "deploy", "target": "report" },
+    { "source": "notify_hold", "target": "report" },
+    { "source": "report", "target": "end" }
+  ]
+}

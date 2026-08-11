@@ -1,0 +1,344 @@
+# Five services, every one of which the code actually talks to. That is the only
+# reason each is here — a compose file padded with things nothing connects to is
+# a diagram, not a deployment.
+#
+#   redis   the worker's job queue
+#   mysql   the durable checkpoint store, for runs that outlive a cache
+#   minio   run artifacts as S3 objects
+#   kafka   run/node events, published alongside the SSE stream
+#   api     FastAPI + uvicorn, the request surface
+#   worker  the same engine consuming queued jobs instead of requests
+#   history Java/Spring Boot: folds the event topic into queryable run history
+#
+# The api and the worker share the run store, which is the point: a run the
+# worker pauses can be answered through the API.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: flowforge
+      MYSQL_DATABASE: flowforge
+    healthcheck:
+      # mysqladmin, not a TCP probe: the port opens well before the server will
+      # accept a connection, and depends_on would let the api start too early.
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-pflowforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    # An InnoDB shutdown cut short by SIGKILL means crash recovery on the next
+    # start. Cheap insurance for a stop that normally takes a second.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: flowforge
+      MINIO_ROOT_PASSWORD: flowforge123
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      # Ask the broker for the API versions it serves: the port accepts
+      # connections well before the raft controller will answer requests, so a
+      # TCP probe would let the api start too early and drop its first events.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    # The broker flushes its log segments on SIGTERM; it exits 143 (128+TERM),
+    # which is a clean stop, not a failure.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  api:
+    build: .
+    image: flowforge:dev
+    command:
+      - python
+      - -m
+      - flowforge
+      - serve
+      - examples
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --mysql
+      - root:flowforge@mysql:3306/flowforge
+      - --kafka
+      - kafka:9092
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # The queue and the artifact bucket the worker shares with this service.
+      # FLOWFORGE_QUEUE_REDIS, not FLOWFORGE_REDIS: the queue and the checkpoint
+      # store are separate choices, and here the store is MySQL.
+      FLOWFORGE_QUEUE_REDIS: "redis:6379"
+      FLOWFORGE_S3_ENDPOINT: "http://minio:9000"
+      AWS_ACCESS_KEY_ID: flowforge
+      AWS_SECRET_ACCESS_KEY: flowforge123
+    depends_on:
+      redis:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      # python instead of curl: the slim image has no curl, and adding one just
+      # for a healthcheck grows the image for nothing.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  worker:
+    image: flowforge:dev
+    command:
+      - python
+      - -m
+      - flowforge
+      - worker
+      - examples
+      - --mysql
+      - root:flowforge@mysql:3306/flowforge
+      - --kafka
+      - kafka:9092
+    environment:
+      PYTHONUNBUFFERED: "1"
+      FLOWFORGE_QUEUE_REDIS: "redis:6379"
+      FLOWFORGE_S3_ENDPOINT: "http://minio:9000"
+      FLOWFORGE_S3_BUCKET: flowforge
+      AWS_ACCESS_KEY_ID: flowforge
+      AWS_SECRET_ACCESS_KEY: flowforge123
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # A consumer has no port to probe, so this checks the heartbeat the loop
+      # refreshes every iteration — liveness of the loop, not of the process.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import asyncio, sys
+          from flowforge.store import RedisClient
+          async def main():
+              client = RedisClient(host="redis", port=6379)
+              try:
+                  alive = await client.execute("EXISTS", "flowforge:worker:heartbeat")
+              finally:
+                  await client.close()
+              sys.exit(0 if alive else 1)
+          asyncio.run(main())
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  # The one Java service, and it earns its place: the Python API answers no
+  # historical question, because a checkpoint is deleted when a run finishes. This
+  # consumes the event topic and projects it into two MySQL tables, so "what ran,
+  # how long did it take, which node failed" becomes a query. A read model, so a
+  # projection lagging or being rebuilt costs the engine nothing.
+  history:
+    build: ./services/history
+    image: flowforge-history:dev
+    ports:
+      - "8090:8090"
+    environment:
+      FLOWFORGE_KAFKA: "kafka:9092"
+      FLOWFORGE_JDBC_URL: "jdbc:mysql://mysql:3306/flowforge"
+      FLOWFORGE_DB_USER: root
+      FLOWFORGE_DB_PASSWORD: flowforge
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  # Smoke test: waits for the API to report healthy, then drives a run, an SSE
+  # stream, a full pause -> resume, and a queued job picked up by the worker and
+  # filed to MinIO. Exits non-zero on failure.
+  smoke:
+    image: flowforge:dev
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+      history:
+        condition: service_healthy
+    environment:
+      FLOWFORGE_QUEUE_REDIS: "redis:6379"
+      FLOWFORGE_S3_ENDPOINT: "http://minio:9000"
+      FLOWFORGE_KAFKA: "kafka:9092"
+      AWS_ACCESS_KEY_ID: flowforge
+      AWS_SECRET_ACCESS_KEY: flowforge123
+    entrypoint:
+      - python
+      - -c
+      - |
+        import asyncio, json, time, urllib.request
+        base = "http://api:8000"
+
+        def post(path, payload=None):
+            data = json.dumps(payload or {}).encode()
+            request = urllib.request.Request(
+                f"{base}{path}", data=data, headers={"Content-Type": "application/json"}
+            )
+            return urllib.request.urlopen(request)
+
+        body = json.load(post("/runs/diamond", {"inputs": {"q": "hi"}}))
+        assert body["status"] == "completed", body
+
+        # Proves the FastAPI layer is what is serving, not the fallback.
+        schema = json.load(urllib.request.urlopen(f"{base}/openapi.json"))
+        assert "/runs/{workflow_id}" in schema["paths"], sorted(schema["paths"])
+
+        frames = post("/runs/research/stream").read().decode()
+        assert "event: run.completed" in frames, frames[-400:]
+
+        paused = json.load(post("/runs/approval"))
+        assert paused["status"] == "paused", paused
+        # The checkpoint survived a trip through MySQL, not just memory.
+        listed = json.load(urllib.request.urlopen(f"{base}/runs"))["paused"]
+        assert paused["run"] in listed, listed
+        done = json.load(
+            post(f"/runs/{paused['run']}/resume", {"answers": {"ask": {"approved": True}}})
+        )
+        assert done["status"] == "completed", done
+        assert done["outputs"]["end"]["report"]["message"].endswith("(deployed: a1b2c3d)"), done
+
+        # The worker leg: queue a job, wait for the artifact to appear in MinIO.
+        from flowforge.artifacts import store_from_env
+        from flowforge.store import RedisClient
+        from flowforge.worker import Job, enqueue
+
+        async def queued_run():
+            client = RedisClient(host="redis", port=6379)
+            try:
+                await enqueue(client, Job("triage", {"severity": 9}))
+            finally:
+                await client.close()
+
+            store = store_from_env()
+            try:
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    runs = await store.list_runs()
+                    if runs:
+                        document = await store.load_result(runs[0])
+                        assert document["status"] == "completed", document
+                        return runs[0]
+                    await asyncio.sleep(1)
+                raise AssertionError("worker filed no artifact within 60s")
+            finally:
+                await store.close()
+
+        run_id = asyncio.run(queued_run())
+
+        # The Kafka leg: the runs above published their events, so the topic must
+        # carry the completed run this test drove through the API.
+        from flowforge.kafka import read_events
+
+        async def check_topic():
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                published = await read_events("kafka:9092", "flowforge.events")
+                started = {e["run"] for e in published if e["type"] == "run.started"}
+                finished = {e["run"] for e in published if e["type"] == "run.completed"}
+                if done["run"] in finished and run_id in finished:
+                    return len(published), len(started)
+                await asyncio.sleep(2)
+            raise AssertionError("kafka topic never carried both runs")
+
+        events, runs = asyncio.run(check_topic())
+
+        # The Java leg: the history service consumes the same topic, so the run
+        # this test drove through the Python API must be queryable from it. This
+        # is what makes it a participant rather than a container that starts.
+        def history(path):
+            deadline = time.time() + 90
+            last = None
+            while time.time() < deadline:
+                try:
+                    return json.load(urllib.request.urlopen(f"http://history:8090{path}"))
+                except Exception as exc:      # projection may still be catching up
+                    last = exc
+                    time.sleep(2)
+            raise AssertionError(f"history service never served {path}: {last}")
+
+        summary = history("/history/summary")
+        assert summary["runs"] >= 2, summary
+        projected = history(f"/history/runs/{done['run']}")
+        assert projected["status"] == "completed", projected
+        timeline = history(f"/history/runs/{done['run']}/timeline")
+        seqs = [e["seq"] for e in timeline["events"]]
+        assert seqs == sorted(seqs), seqs
+        assert timeline["events"][0]["type"] == "run.started", timeline["events"][:2]
+        # The worker's run went through the same topic, from a different process.
+        worker_run = history(f"/history/runs/{run_id}")
+        assert worker_run["status"] == "completed", worker_run
+
+        print(
+            "smoke ok:", done["stats"],
+            "| worker artifact:", run_id,
+            f"| kafka: {events} events across {runs} runs",
+            f"| history: {summary['runs']} runs projected,",
+            f"{timeline['count']} events on the api run",
+        )
+    profiles:
+      - test

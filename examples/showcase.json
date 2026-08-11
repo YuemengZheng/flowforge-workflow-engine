@@ -1,0 +1,36 @@
+{
+  "id": "showcase",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    { "id": "search", "type": "stub", "config": { "delay": 0.5, "output": { "hits": 12 } } },
+    { "id": "database", "type": "stub", "config": { "delay": 0.7, "output": { "rows": 40 } } },
+    { "id": "cache", "type": "stub", "config": { "delay": 0.3, "output": { "hit": false } } },
+    { "id": "summarize", "type": "stub", "config": { "delay": 0.6 } },
+    { "id": "ask", "type": "await_input", "config": { "prompt": "Publish the summary?", "fields": ["approved"] } },
+    {
+      "id": "gate",
+      "type": "decision",
+      "config": {
+        "cases": [{ "when": "{{ask.approved}} == true", "branch": "publish" }],
+        "default": "hold"
+      }
+    },
+    { "id": "publish", "type": "stub", "config": { "delay": 0.4 } },
+    { "id": "hold", "type": "stub", "config": { "delay": 0.2 } },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "search" },
+    { "source": "start", "target": "database" },
+    { "source": "start", "target": "cache" },
+    { "source": "search", "target": "summarize" },
+    { "source": "database", "target": "summarize" },
+    { "source": "cache", "target": "summarize" },
+    { "source": "summarize", "target": "ask" },
+    { "source": "ask", "target": "gate" },
+    { "source": "gate", "target": "publish", "branch": "publish" },
+    { "source": "gate", "target": "hold", "branch": "hold" },
+    { "source": "publish", "target": "end" },
+    { "source": "hold", "target": "end" }
+  ]
+}

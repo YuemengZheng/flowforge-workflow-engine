@@ -1,0 +1,40 @@
+{
+  "id": "research",
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "fetch_docs",
+      "type": "stub",
+      "timeout": 5,
+      "retries": 2,
+      "config": { "delay": 0.05, "output": { "docs": "kahn topological scheduling" } }
+    },
+    {
+      "id": "fetch_notes",
+      "type": "stub",
+      "timeout": 5,
+      "retries": 2,
+      "config": { "delay": 0.05, "output": { "notes": "ready queue and in-degree table" } }
+    },
+    {
+      "id": "draft",
+      "type": "llm",
+      "timeout": 60,
+      "retries": 1,
+      "config": {
+        "provider": "echo",
+        "model": "claude-opus-5",
+        "system": "You are a concise technical writer.",
+        "prompt": "Write about {{ fetch_docs.docs }} using {{ fetch_notes.notes }} for {{ inputs.audience ?? \"a new teammate\" }}"
+      }
+    },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "fetch_docs" },
+    { "source": "start", "target": "fetch_notes" },
+    { "source": "fetch_docs", "target": "draft" },
+    { "source": "fetch_notes", "target": "draft" },
+    { "source": "draft", "target": "end" }
+  ]
+}

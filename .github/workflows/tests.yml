@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The core is standard library only; the dev extra adds fastapi, httpx and
+      # pymysql so the API and SQL tests run instead of skipping.
+      - run: pip install '.[dev]'
+      # The tests that need a real Redis / MySQL / MinIO / Kafka skip themselves
+      # unless FLOWFORGE_TEST_* points at one, so this runs with no services.
+      - run: python -m unittest discover -s tests -t .
